@@ -12,9 +12,13 @@ def fib(n)
 end
 
 get "/fib/:n" do
-  n = Integer(params[:n]) rescue halt 400, { error: "n must be integer" }.to_json
+  begin
+    n = Integer(params["n"])
+  rescue ArgumentError
+    halt 400, { error: "n must be integer" }.to_json
+  end
+
   halt 400, { error: "n must be 0..1_000_000" }.to_json unless (0..1_000_000).include?(n)
   content_type :json
   { n: n, value: fib(n) }.to_json
 end
-
