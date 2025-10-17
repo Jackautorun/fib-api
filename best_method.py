@@ -39,14 +39,27 @@ Conflict notes: <if any>
 - Cost & Time: <numbers>
 Owner: <name> | Review date: <yyyy-mm-dd>
 """
-def call_pplx(api_key,prompt):
-    h={"Authorization":f"Bearer {api_key}","Content-Type":"application/json"}
-    body={"model":MODEL,"messages":[
-        {"role":"system","content":"You are a method-finder. Produce a single rigorous one-pager with verifiable citations."},
-        {"role":"user","content":prompt}],
-        "temperature":0.2,"top_p":0.9,"max_tokens":2000,"return_citations":True}
-    r=requests.post(API_URL,headers=h,data=json.dumps(body),timeout=120); r.raise_for_status()
+# ใน tools.best_method.py (หรือ best_method.py)
+def call_perplexity(api_key: str, prompt: str) -> str:
+    if not api_key or not api_key.isascii():
+        raise SystemExit("PPLX_API_KEY ต้องเป็น ASCII เท่านั้น (pplx-...).")
+
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    body = {
+        "model": "sonar-pro",
+        "messages": [
+            {"role": "system", "content": "You are a method-finder. Produce a single rigorous one-pager with verifiable citations."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "max_tokens": 2000,
+        "return_citations": True,
+    }
+    r = requests.post(API_URL, headers=headers, json=body, timeout=120)  # ใช้ json= แทน data=
+    r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"]
+
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("--topic",required=True); ap.add_argument("--constraints",required=True)
