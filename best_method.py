@@ -1,6 +1,9 @@
-import argparse, os, json, requests
-API_URL="https://api.perplexity.ai/chat/completions"; MODEL="sonar-pro"
-PROMPT_TMPL="""Goal: find the SINGLE best method to {topic}
+import argparse, os, json, sys, requests
+
+API_URL = "https://api.perplexity.ai/chat/completions"
+MODEL = "sonar-pro"
+
+PROMPT_TMPL = """Goal: find the SINGLE best method to {topic}
 Constraints: {constraints}
 Deliverables:
 1) ranked options (max 5) with pros/cons, risks, prerequisites
@@ -39,14 +42,13 @@ Conflict notes: <if any>
 - Cost & Time: <numbers>
 Owner: <name> | Review date: <yyyy-mm-dd>
 """
-# ใน tools.best_method.py (หรือ best_method.py)
+
 def call_perplexity(api_key: str, prompt: str) -> str:
     if not api_key or not api_key.isascii():
-        raise SystemExit("PPLX_API_KEY ต้องเป็น ASCII เท่านั้น (pplx-...).")
-
+        raise SystemExit("PPLX_API_KEY ต้องเป็น ASCII (รูปแบบ pplx-...).")
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     body = {
-        "model": "sonar-pro",
+        "model": MODEL,
         "messages": [
             {"role": "system", "content": "You are a method-finder. Produce a single rigorous one-pager with verifiable citations."},
             {"role": "user", "content": prompt},
@@ -56,20 +58,46 @@ def call_perplexity(api_key: str, prompt: str) -> str:
         "max_tokens": 2000,
         "return_citations": True,
     }
-    r = requests.post(API_URL, headers=headers, json=body, timeout=120)  # ใช้ json= แทน data=
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"]
+    r = requests.post(API_URL, headers=headers, json=body, timeout=120)
+    try:
+        r.raise_for_status()
+        data = r.json()
+    except Exception:
+        print("HTTP", r.status_code, r.text[:800], file=sys.stderr)
+        raise
+    return data["choices"][0]["message"]["content"]
+
+# เผื่อมีที่เรียกชื่อเดิม
+def call_pplx(api_key, prompt):
+    return call_perplexity(api_key, prompt)
 
 def main():
-    ap=argparse.ArgumentParser()
-    ap.add_argument("--topic",required=True); ap.add_argument("--constraints",required=True)
-    ap.add_argument("--domains",default=""); ap.add_argument("--recency",default="365d")
-    ap.add_argument("--max-sources",default="8"); ap.add_argument("--out",default="runs/best_method.md")
-    args=ap.parse_args()
-    api=os.getenv("PPLX_API_KEY");  assert api, "Missing PPLX_API_KEY"
-    prompt=PROMPT_TMPL.format(topic=args.topic,constraints=args.constraints,domains=args.domains,recency=args.recency)
-    md=call_pplx(api,prompt).strip()
-    os.makedirs(os.path.dirname(args.out) or ".",exist_ok=True)
-    with open(args.out,"w",encoding="utf-8") as f: f.write(md)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--topic", required=True)
+    ap.add_argument("--constraints", required=True)
+    ap.add_argument("--domains", default="")
+    ap.add_argument("--recency", default="365d")
+    ap.add_argument("--max-sources", default="8")
+    ap.add_argument("--out", default="runs/best_method.md")
+    args = ap.parse_args()
+
+    api = os.getenv("PPLX_API_KEY")
+    if not api:
+        raise SystemExit("Missing PPLX_API_KEY")
+
+    prompt = PROMPT_TMPL.format(
+        topic=args.topic,
+        constraints=args.constraints,
+        domains=args.domains,
+        recency=args.recency,
+    )
+
+    md = call_perplexity(api, prompt).strip()
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+    with open(args.out, "w", encoding="utf-8") as f:
+        f.write(md)
     print(f"Wrote {args.out}")
-if __name__=="__main__": main()
+
+if __name__ == "__main__":
+    main()
+
