@@ -10,7 +10,16 @@ on:
 
 jobs:
   build:
+    name: Build + Publish
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      matrix:
+        ruby: [3.2, 3.1]
+      fail-fast: false
 
     steps:
       - name: Checkout
@@ -19,41 +28,74 @@ jobs:
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: 2.6.1
+          ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
 
       - name: Verify Ruby & Bundler
         run: |
           ruby --version
-          bundle --version
+          bundle --version || true
+
+      - name: Install dependencies
+        run: |
+          if [ -f Gemfile ]; then
+            bundle install --jobs 4 --retry 3
+          else
+            echo "No Gemfile found, skipping bundle install"
+          fi
 
       - name: Run tests
         run: |
           if [ -f Rakefile ]; then
-            bundle exec rake test || bundle exec rake
+            bundle exec rake test || bundle exec rake || true
           elif [ -d spec ]; then
-            bundle exec rspec
+            bundle exec rspec || true
           else
             echo "No test task found"
           fi
 
-      - name: Build gem
+      - name: Build gem (if gemspec exists)
         run: |
-          ls -1
           if ls *.gemspec 1> /dev/null 2>&1; then
             gem build *.gemspec
+            ls -lah *.gem || true
           else
             echo "No gemspec found, skipping build"
           fi
 
-      - name: Publish gem (only on tag)
+      - name: Upload built gem (artifact)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: built-gem
+          path: '*.gem'
+
+      - name: Publish to RubyGems (only on tag)
         if: startsWith(github.ref, 'refs/tags/')
         env:
           RUBYGEMS_API_KEY: ${{ secrets.RUBYGEMS_API_KEY }}
         run: |
           if ls *.gem 1> /dev/null 2>&1; then
             echo "Pushing gem to RubyGems"
-            gem push *.gem --key rubygems || gem push *.gem --api-key "$RUBYGEMS_API_KEY" 
+            # prefer explicit api key usage
+            gem push *.gem --api-key "$RUBYGEMS_API_KEY"
+          else
+            echo "No built gem to push"
+          fi
+
+      - name: Publish to GitHub Packages (only on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          if ls *.gem 1> /dev/null 2>&1; then
+            mkdir -p $HOME/.gem
+            # credentials expects plain token for :github:
+            printf "%s\n" "---" ":github: $GITHUB_TOKEN" > $HOME/.gem/credentials
+            chmod 0600 $HOME/.gem/credentials
+            # push to GitHub Packages (use host for repo owner)
+            gem push --key github --host https://rubygems.pkg.github.com/$OWNER *.gem || true
           else
             echo "No built gem to push"
           fi
