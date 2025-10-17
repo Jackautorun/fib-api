@@ -27,9 +27,6 @@ jobs:
           ruby --version
           bundle --version
 
-      - name: Install dependencies
-        run: bundle install --jobs 4 --retry 3
-
       - name: Run tests
         run: |
           if [ -f Rakefile ]; then
