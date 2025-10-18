@@ -1,99 +1,155 @@
-name: Ruby Gem
+import argparse
+import os
+import json
+import sys
+import requests
 
-on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+# optional: load .env if python-dotenv is installed
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv()
+except Exception:
+    # dotenv is optional; if not installed we simply ignore
+    pass
 
-jobs:
-  build:
-    name: Build + Publish
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+API_URL = "https://api.perplexity.ai/chat/completions"
+MODEL = "sonar-pro"
 
-strategy:
-  matrix:
-    ruby: [3.2, 3.1]
-  fail-fast: false
+PROMPT_TMPL = """Goal: find the SINGLE best method to {topic}
+Constraints: {constraints}
+Deliverables:
+1) ranked options (max 5) with pros/cons, risks, prerequisites
+2) pick ONE winner with a step-by-step plan
+3) cite ≥5 independent sources with permanent links/DOI
+4) prefer recency < {recency} and official standards/guidelines
+5) list failure modes, rollback, and cost/time estimates
+Rules: no claim without citation; dedup near-duplicates; prefer meta-analyses, RCTs, specs, vendor docs; if evidence conflicts, explain and choose.
+Search focus domains: {domains}
+Prefer at least {max_sources} independent sources when available.
+Output strictly in the following Markdown one-pager:
 
-steps:
-  - name: Checkout
-    uses: actions/checkout@v4
+# Best Method: <name>
+Decision: <Deploy | Pilot | Reject>
 
-  - name: Set up Ruby
-    uses: ruby/setup-ruby@v1
-    with:
-      ruby-version: ${{ matrix.ruby }}
-      bundler-cache: true
+## Why this
+- OEC impact: <number% + reason>
+- Constraints fit: <time/budget/platform>
+- Key risks + mitigations: <3 bullets>
 
-  - name: Verify Ruby & Bundler
-    run: |
-      ruby --version
-      bundle --version
+## How to execute (Step-by-step)
+1) ...
+2) ...
+3) ...
+Quick-start D1: <5-item checklist>
 
-  - name: Install dependencies
-    run: bundle install --jobs 4 --retry 3
+## Alternatives compared (max 4)
+- <alt> — Pros/Cons — Why not chosen
 
-  - name: Run tests
-    run: |
-      if [ -f Rakefile ]; then
-        bundle exec rake test || bundle exec rake
-      elif [ -d spec ]; then
-        bundle exec rspec
-      else
-        echo "No test task found"
-      fi
+## Evidence (>=5)
+1) <link/DOI> — finding
+2) ...
+Conflict notes: <if any>
 
-  - name: Build gem (if gemspec exists)
-    run: |
-      if ls *.gemspec 1> /dev/null 2>&1; then
-        gem build *.gemspec
-        ls -lah *.gem || true
-      else
-        echo "No gemspec found, skipping build"
-      fi
+## Guardrails & Costs
+- Latency/Error/Fairness/Legal: <status + thresholds>
+- Cost & Time: <numbers>
+Owner: <name> | Review date: <yyyy-mm-dd>
+"""
 
-  - name: Upload built gem (artifact)
-    if: always()
-    uses: actions/upload-artifact@v4
-    with:
-      name: built-gem
-      path: '*.gem'
+def call_perplexity(api_key: str, prompt: str) -> str:
+    # basic sanity checks
+    if not api_key or not isinstance(api_key, str) or not api_key.strip():
+        raise SystemExit("PPLX_API_KEY is empty. Provide a valid API key via --api-key or the PPLX_API_KEY environment variable.")
+    # require ascii to avoid encoding surprises with headers
+    if not api_key.isascii():
+        raise SystemExit("PPLX_API_KEY must contain only ASCII characters.")
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    body = {
+        "model": MODEL,
+        "messages": [
+            {"role": "system", "content": "You are a method-finder. Produce a single rigorous one-pager with verifiable citations."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "max_tokens": 2000,
+        "return_citations": True,
+    }
+    try:
+        r = requests.post(API_URL, headers=headers, json=body, timeout=120)
+        r.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        # print helpful debug info then exit non-zero
+        status = getattr(e.response, "status_code", None)
+        text = getattr(e.response, "text", None)
+        print("HTTP request failed.", file=sys.stderr)
+        if status:
+            print("Status:", status, file=sys.stderr)
+        if text:
+            print("Response body (truncated):", text[:1000], file=sys.stderr)
+        print("Exception:", str(e), file=sys.stderr)
+        raise SystemExit(1)
+    try:
+        data = r.json()
+    except Exception:
+        print("Failed to decode JSON response.", file=sys.stderr)
+        print("Response (truncated):", r.text[:1000], file=sys.stderr)
+        raise
+    # defensive access
+    try:
+        return data["choices"][0]["message"]["content"]
+    except Exception:
+        print("Unexpected response shape:", json.dumps(data)[:1000], file=sys.stderr)
+        raise SystemExit(1)
 
-  - name: Publish gem (only on tag & on main)
-    if: startsWith(github.ref, 'refs/tags/') && github.repository == 'Jackautorun/fib-api'
-    env:
-      RUBYGEMS_API_KEY: ${{ secrets.RUBYGEMS_API_KEY }}
-    run: |
-      if ls *.gem 1> /dev/null 2>&1; then
-        echo "Pushing gem to RubyGems"
-        gem push *.gem --api-key "$RUBYGEMS_API_KEY"
-      else
-        echo "No built gem to push"
-      fi
+# backward compatible alias
+def call_pplx(api_key, prompt):
+    return call_perplexity(api_key, prompt)
 
-    - name: Publish to GPR
-      run: |
-        mkdir -p $HOME/.gem
-        touch $HOME/.gem/credentials
-        chmod 0600 $HOME/.gem/credentials
-        printf -- "---\n:github: ${GEM_HOST_API_KEY}\n" > $HOME/.gem/credentials
-        gem build *.gemspec
-        gem push --KEY github --host https://rubygems.pkg.github.com/${OWNER} *.gem
-      env:
-        GEM_HOST_API_KEY: "Bearer ${{secrets.GITHUB_TOKEN}}"
-        OWNER: ${{ github.repository_owner }}
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--topic", required=True, help="Topic to find the best method for")
+    ap.add_argument("--constraints", required=True, help="Constraints text")
+    ap.add_argument("--domains", default="", help="Comma-separated domains to focus search")
+    ap.add_argument("--recency", default="365d", help="Prefer recency (e.g. 365d)")
+    ap.add_argument("--max-sources", default="8", help="Preferred minimum number of sources")
+    ap.add_argument("--out", default="runs/best_method.md", help="Output markdown file")
+    ap.add_argument("--api-key", default=None, help="Perplexity API key (can also set PPLX_API_KEY env var)")
+    args = ap.parse_args()
 
-    - name: Publish to RubyGems
-      run: |
-        mkdir -p $HOME/.gem
-        touch $HOME/.gem/credentials
-        chmod 0600 $HOME/.gem/credentials
-        printf -- "---\n:rubygems_api_key: ${GEM_HOST_API_KEY}\n" > $HOME/.gem/credentials
-        gem build *.gemspec
-        gem push *.gem
-      env:
-        GEM_HOST_API_KEY: "${{secrets.RUBYGEMS_AUTH_TOKEN}}"
+    # precedence: CLI arg -> env var -> .env loaded earlier
+    api = args.api_key or os.getenv("PPLX_API_KEY")
+    if not api:
+        # helpful guidance for Windows and CI
+        msg = (
+            "Missing PPLX_API_KEY. Provide it via:\n"
+            "  - CLI: --api-key your_key_here\n"
+            "  - Environment: set PPLX_API_KEY (Windows: set PPLX_API_KEY=... or PowerShell: $env:PPLX_API_KEY='...')\n"
+            "  - .env file in project root with PPLX_API_KEY=...\n"
+            "If you want me to store this change in the repo, tell me to create a PR."
+        )
+        raise SystemExit(msg)
+
+    prompt = PROMPT_TMPL.format(
+        topic=args.topic,
+        constraints=args.constraints,
+        domains=args.domains,
+        recency=args.recency,
+        max_sources=args.max_sources,
+    )
+
+    try:
+        md = call_perplexity(api, prompt).strip()
+    except SystemExit:
+        raise
+    except Exception as e:
+        print("Error calling API:", str(e), file=sys.stderr)
+        raise SystemExit(1)
+
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+    with open(args.out, "w", encoding="utf-8") as f:
+        f.write(md)
+    print(f"Wrote {args.out}")
+
+if __name__ == "__main__":
+    main()
