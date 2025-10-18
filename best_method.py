@@ -1,4 +1,16 @@
-import argparse, os, json, sys, requests
+import argparse
+import os
+import json
+import sys
+import requests
+
+# optional: load .env if python-dotenv is installed
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv()
+except Exception:
+    # dotenv is optional; if not installed we simply ignore
+    pass
 
 API_URL = "https://api.perplexity.ai/chat/completions"
 MODEL = "sonar-pro"
@@ -13,6 +25,7 @@ Deliverables:
 5) list failure modes, rollback, and cost/time estimates
 Rules: no claim without citation; dedup near-duplicates; prefer meta-analyses, RCTs, specs, vendor docs; if evidence conflicts, explain and choose.
 Search focus domains: {domains}
+Prefer at least {max_sources} independent sources when available.
 Output strictly in the following Markdown one-pager:
 
 # Best Method: <name>
@@ -44,8 +57,12 @@ Owner: <name> | Review date: <yyyy-mm-dd>
 """
 
 def call_perplexity(api_key: str, prompt: str) -> str:
-    if not api_key or not api_key.isascii():
-        raise SystemExit("PPLX_API_KEY ต้องเป็น ASCII (รูปแบบ pplx-...).")
+    # basic sanity checks
+    if not api_key or not isinstance(api_key, str) or not api_key.strip():
+        raise SystemExit("PPLX_API_KEY is empty. Provide a valid API key via --api-key or the PPLX_API_KEY environment variable.")
+    # require ascii to avoid encoding surprises with headers
+    if not api_key.isascii():
+        raise SystemExit("PPLX_API_KEY must contain only ASCII characters.")
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     body = {
         "model": MODEL,
@@ -58,41 +75,77 @@ def call_perplexity(api_key: str, prompt: str) -> str:
         "max_tokens": 2000,
         "return_citations": True,
     }
-    r = requests.post(API_URL, headers=headers, json=body, timeout=120)
     try:
+        r = requests.post(API_URL, headers=headers, json=body, timeout=120)
         r.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        # print helpful debug info then exit non-zero
+        status = getattr(e.response, "status_code", None)
+        text = getattr(e.response, "text", None)
+        print("HTTP request failed.", file=sys.stderr)
+        if status:
+            print("Status:", status, file=sys.stderr)
+        if text:
+            print("Response body (truncated):", text[:1000], file=sys.stderr)
+        print("Exception:", str(e), file=sys.stderr)
+        raise SystemExit(1)
+    try:
         data = r.json()
     except Exception:
-        print("HTTP", r.status_code, r.text[:800], file=sys.stderr)
+        print("Failed to decode JSON response.", file=sys.stderr)
+        print("Response (truncated):", r.text[:1000], file=sys.stderr)
         raise
-    return data["choices"][0]["message"]["content"]
+    # defensive access
+    try:
+        return data["choices"][0]["message"]["content"]
+    except Exception:
+        print("Unexpected response shape:", json.dumps(data)[:1000], file=sys.stderr)
+        raise SystemExit(1)
 
-# เผื่อมีที่เรียกชื่อเดิม
+# backward compatible alias
 def call_pplx(api_key, prompt):
     return call_perplexity(api_key, prompt)
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--topic", required=True)
-    ap.add_argument("--constraints", required=True)
-    ap.add_argument("--domains", default="")
-    ap.add_argument("--recency", default="365d")
-    ap.add_argument("--max-sources", default="8")
-    ap.add_argument("--out", default="runs/best_method.md")
+    ap.add_argument("--topic", required=True, help="Topic to find the best method for")
+    ap.add_argument("--constraints", required=True, help="Constraints text")
+    ap.add_argument("--domains", default="", help="Comma-separated domains to focus search")
+    ap.add_argument("--recency", default="365d", help="Prefer recency (e.g. 365d)")
+    ap.add_argument("--max-sources", default="8", help="Preferred minimum number of sources")
+    ap.add_argument("--out", default="runs/best_method.md", help="Output markdown file")
+    ap.add_argument("--api-key", default=None, help="Perplexity API key (can also set PPLX_API_KEY env var)")
     args = ap.parse_args()
 
-    api = os.getenv("PPLX_API_KEY")
+    # precedence: CLI arg -> env var -> .env loaded earlier
+    api = args.api_key or os.getenv("PPLX_API_KEY")
     if not api:
-        raise SystemExit("Missing PPLX_API_KEY")
+        # helpful guidance for Windows and CI
+        msg = (
+            "Missing PPLX_API_KEY. Provide it via:\n"
+            "  - CLI: --api-key your_key_here\n"
+            "  - Environment: set PPLX_API_KEY (Windows: set PPLX_API_KEY=... or PowerShell: $env:PPLX_API_KEY='...')\n"
+            "  - .env file in project root with PPLX_API_KEY=...\n"
+            "If you want me to store this change in the repo, tell me to create a PR."
+        )
+        raise SystemExit(msg)
 
     prompt = PROMPT_TMPL.format(
         topic=args.topic,
         constraints=args.constraints,
         domains=args.domains,
         recency=args.recency,
+        max_sources=args.max_sources,
     )
 
-    md = call_perplexity(api, prompt).strip()
+    try:
+        md = call_perplexity(api, prompt).strip()
+    except SystemExit:
+        raise
+    except Exception as e:
+        print("Error calling API:", str(e), file=sys.stderr)
+        raise SystemExit(1)
+
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(md)
@@ -100,4 +153,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
